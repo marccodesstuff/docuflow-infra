@@ -1,0 +1,78 @@
+# GitHub Actions CI for docuflow-infra
+# .github/workflows/ci.yml
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.0
+
+      - name: Terraform Format
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        run: |
+          cd terraform/environments/dev
+          terraform init -backend=false
+
+      - name: Terraform Validate
+        run: |
+          cd terraform/environments/dev
+          terraform validate
+
+      - name: Validate Kubernetes manifests
+        run: |
+          # Install kubeval
+          curl -sSL https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz | tar xz
+          sudo mv kubeval /usr/local/bin/
+          kubeval --strict kubernetes/base/**/*.yaml
+
+      - name: Validate Docker Compose
+        run: |
+          docker compose -f docker/docker-compose.yml config
+
+  docker:
+    needs: validate
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [docuflow-core, docuflow-integrations, docuflow-ml, docuflow-api, docuflow-reverb]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ../${{ matrix.service }}
+          file: ../${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ghcr.io/docuflow/${{ matrix.service }}:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

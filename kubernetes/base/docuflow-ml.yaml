@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docuflow-ml
+  namespace: docuflow
+  labels:
+    app: docuflow-ml
+    app.kubernetes.io/name: docuflow-ml
+    app.kubernetes.io/part-of: docuflow-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: docuflow-ml
+  template:
+    metadata:
+      labels:
+        app: docuflow-ml
+    spec:
+      serviceAccountName: docuflow
+      containers:
+        - name: docuflow-ml
+          image: docuflow/docuflow-ml:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 50051
+              name: grpc
+            - containerPort: 9090
+              name: metrics
+          envFrom:
+            - configMapRef:
+                name: docuflow-config
+            - secretRef:
+                name: docuflow-secrets
+          env:
+            - name: DOCUFLOW_ML_DEVICE
+              value: "cpu"
+            - name: DOCUFLOW_ML_MODEL_CACHE_DIR
+              value: "/models"
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "1000m"
+              nvidia.com/gpu: "0"
+            limits:
+              memory: "8Gi"
+              cpu: "2000m"
+              nvidia.com/gpu: "0"
+          livenessProbe:
+            exec:
+              command: ["grpc_health_probe", "-addr=localhost:50051"]
+            initialDelaySeconds: 120
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["grpc_health_probe", "-addr=localhost:50051"]
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: docuflow-ml-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: docuflow-ml
+  namespace: docuflow
+spec:
+  selector:
+    app: docuflow-ml
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: docuflow-ml-models
+  namespace: docuflow
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: fast-storage

@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docuflow-core
+  namespace: docuflow
+  labels:
+    app: docuflow-core
+    app.kubernetes.io/name: docuflow-core
+    app.kubernetes.io/part-of: docuflow-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: docuflow-core
+  template:
+    metadata:
+      labels:
+        app: docuflow-core
+    spec:
+      serviceAccountName: docuflow
+      containers:
+        - name: docuflow-core
+          image: docuflow/docuflow-core:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 9090
+              name: grpc
+          envFrom:
+            - configMapRef:
+                name: docuflow-config
+            - secretRef:
+                name: docuflow-secrets
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: tmp-storage
+              mountPath: /tmp/docuflow
+      volumes:
+        - name: tmp-storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: docuflow-core
+  namespace: docuflow
+spec:
+  selector:
+    app: docuflow-core
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: grpc
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP

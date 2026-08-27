@@ -1,0 +1,378 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: docuflow-postgres
+    environment:
+      POSTGRES_DB: docuflow
+      POSTGRES_USER: docuflow
+      POSTGRES_PASSWORD: docuflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docuflow -d docuflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - docuflow-network
+
+  # Redis for caching, queues, sessions
+  redis:
+    image: redis:7-alpine
+    container_name: docuflow-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - docuflow-network
+
+  # MinIO for S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: docuflow-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - docuflow-network
+
+  # Kafka for event streaming
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: docuflow-kafka
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    depends_on:
+      - zookeeper
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/etc/confluent/docker/healthcheck"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - docuflow-network
+
+  # Zookeeper for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: docuflow-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    networks:
+      - docuflow-network
+
+  # RabbitMQ for webhook delivery and notifications
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: docuflow-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - docuflow-network
+
+  # DocuFlow Core (Spring Boot)
+  docuflow-core:
+    build:
+      context: ../docuflow-core
+      dockerfile: Dockerfile
+    container_name: docuflow-core
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DATABASE_URL: jdbc:postgresql://postgres:5432/docuflow_core
+      DATABASE_USER: docuflow
+      DATABASE_PASSWORD: docuflow
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: docuflow
+      GRPC_PORT: 9090
+      ML_SIDECAR_URL: http://docuflow-ml:50051
+      OAUTH2_ISSUER_URI: http://keycloak:8080/realms/docuflow
+    ports:
+      - "8081:8080"
+      - "9090:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - docuflow-network
+
+  # DocuFlow Integrations (Spring Boot + Camel)
+  docuflow-integrations:
+    build:
+      context: ../docuflow-integrations
+      dockerfile: Dockerfile
+    container_name: docuflow-integrations
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+    ports:
+      - "8082:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - docuflow-network
+
+  # DocuFlow ML Sidecar (Python gRPC)
+  docuflow-ml:
+    build:
+      context: ../docuflow-ml-sidecar
+      dockerfile: Dockerfile
+    container_name: docuflow-ml
+    environment:
+      DOCUFLOW_ML_HOST: 0.0.0.0
+      DOCUFLOW_ML_PORT: 50051
+      DOCUFLOW_ML_DEVICE: cpu
+      DOCUFLOW_ML_MODEL_CACHE_DIR: /models
+      DOCUFLOW_ML_LOG_LEVEL: INFO
+    ports:
+      - "50051:50051"
+      - "9090:9090"
+    volumes:
+      - ml_models:/models
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+    networks:
+      - docuflow-network
+
+  # DocuFlow API Gateway (Laravel)
+  docuflow-api:
+    build:
+      context: ../docuflow-api-gateway
+      dockerfile: Dockerfile
+    container_name: docuflow-api
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_URL: http://localhost
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: docuflow_api
+      DB_USERNAME: docuflow
+      DB_PASSWORD: docuflow
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      QUEUE_CONNECTION: redis
+      CACHE_DRIVER: redis
+      SESSION_DRIVER: redis
+      BROADCAST_DRIVER: reverb
+      REVERB_APP_ID: docuflow
+      REVERB_APP_KEY: docuflow-key
+      REVERB_APP_SECRET: docuflow-secret
+      REVERB_HOST: 0.0.0.0
+      REVERB_PORT: 8080
+      REVERB_SCHEME: http
+      GRPC_CORE_HOST: docuflow-core
+      GRPC_CORE_PORT: 9090
+      GRPC_ML_HOST: docuflow-ml
+      GRPC_ML_PORT: 50051
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_BUCKET: docuflow
+      AWS_USE_PATH_STYLE_ENDPOINT: "true"
+      AWS_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    ports:
+      - "8000:80"
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      docuflow-core:
+        condition: service_started
+      docuflow-ml:
+        condition: service_started
+    networks:
+      - docuflow-network
+
+  # Reverb WebSocket Server
+  reverb:
+    build:
+      context: ../docuflow-api-gateway
+      dockerfile: Dockerfile.reverb
+    container_name: docuflow-reverb
+    environment:
+      REVERB_APP_ID: docuflow
+      REVERB_APP_KEY: docuflow-key
+      REVERB_APP_SECRET: docuflow-secret
+      REVERB_HOST: 0.0.0.0
+      REVERB_PORT: 8080
+      REVERB_SCHEME: http
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redis
+    networks:
+      - docuflow-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: docuflow-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./docker/nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - docuflow-api
+      - reverb
+    networks:
+      - docuflow-network
+
+  # Keycloak for Authentication
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: docuflow-keycloak
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/docuflow_keycloak
+      KC_DB_USERNAME: docuflow
+      KC_DB_PASSWORD: docuflow
+      KC_HOSTNAME: localhost
+      KC_HTTP_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./docker/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - docuflow-network
+
+  # Prometheus for Metrics
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: docuflow-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - docuflow-network
+
+  # Grafana for Dashboards
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: docuflow-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - docuflow-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_logs:
+  rabbitmq_data:
+  ml_models:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  docuflow-network:
+    driver: bridge

@@ -1,0 +1,77 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: docuflow
+
+resources:
+  - ../../base
+
+commonLabels:
+  environment: prod
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: docuflow-core
+      spec:
+        replicas: 4
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: docuflow-integrations
+      spec:
+        replicas: 3
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: docuflow-api
+      spec:
+        replicas: 5
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: docuflow-ml
+      spec:
+        replicas: 3
+        template:
+          spec:
+            containers:
+              - name: docuflow-ml
+                resources:
+                  requests:
+                    memory: "8Gi"
+                    cpu: "2000m"
+                    nvidia.com/gpu: "1"
+                  limits:
+                    memory: "16Gi"
+                    cpu: "4000m"
+                    nvidia.com/gpu: "1"
+  - patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: kafka
+      spec:
+        replicas: 3
+  - patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: postgres
+      spec:
+        template:
+          spec:
+            containers:
+              - name: postgres
+                resources:
+                  requests:
+                    memory: "2Gi"
+                    cpu: "1000m"
+                  limits:
+                    memory: "4Gi"
+                    cpu: "2000m"

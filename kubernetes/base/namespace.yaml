@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: docuflow
+  labels:
+    app.kubernetes.io/name: docuflow
+    app.kubernetes.io/part-of: docuflow-platform
